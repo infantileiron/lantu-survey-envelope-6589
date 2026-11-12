@@ -45,11 +45,22 @@ JWT角色由后端校验，审计记录写入与拒绝状态；全局错误与�
 
 面积单位m²，长度m。图形x/y缩放相同；单位置视窗留白仅用于可视化，不是物理缓冲面。三种面积分别展示；分母0的比值返回null，不输出0%假占比。凸包填平凹口，不能解释为真实采集覆盖或地理边界。
 
+## 复测凸包比较
+
+单看两次包络面积相等会漏掉足迹整体偏移：平移后的凸包面积不变，但与原凸包的交叠变小、两侧各有新增/减少。复测比较页（导航07）选定**基准研究与复测研究的两次成功运行**，按点组编号比较两侧**凸包**的交叠、新增、减少面积，并核对两侧面积守恒。
+
+- 仅 `completed` 运行可参与，同一运行不能与自身比较；坐标系（local_m）、去重口径、`area_tie_relative`、算法版本任一不一致即 **422 拒绝比较**，不落任何记录。
+- 按 `group_id` 配对：两侧都存在才计交叠；仅单侧存在的点组**缺组单列**（`missing_in_retest`/`missing_in_baseline`），交叠/新增/减少为 null，不参与面积守恒。
+- 交叠用纯标准库 Sutherland–Hodgman 凸多边形裁剪（`services/polygon_overlap.py`），O(h) 裁剪边逐次求交；相离、边相切、点相切、point/line 退化都返回**零面积空交叠，点线和相切不算重叠面**。新增=复测面积−交叠，减少=基准面积−交叠。
+- 每组与合计都核对守恒恒等式：复测面积=交叠+新增、基准面积=交叠+减少、净变化=新增−减少=(复测−基准)，容差 rel=1e-9、abs=1e-6 m²，超差标记 `conservation_ok=false`。
+- 比较创建时整体冻结：`RunComparison` 保存双方运行ID、双方来源指纹（研究/测组/来源文件/口径/结果校验和）与完整差异几何和差异校验和。**源数据更新后历史比较不重算，也不自动换用后续运行**；要比较新运行需新建比较。
+- 比较页可叠看两侧凸包边界与交叠/新增/减少区域（等比例米制 SVG，even-odd 挖空仅为示意，精确面积以明细表为准），点击差异表行切换点组。
+
 API必须声明local_m，每组1至300条、最多8组，组ID唯一、组内点ID唯一，坐标有限且绝对值≤1e9；重复坐标不是重复点ID。没有自动投影、吸附、重采样或坐标修补。
 
 ## 实体、精度与技术
 
-六实体 PointSurvey、BoundaryPolicy、EnvelopeStudy、EnvelopeRun、FootprintReview、Report，贯穿表/model/schema/service/route、前端API/store/page。研究快照冻结完整原始测组、去重口径、方向参数、算法版本与选组范围；运行和复核新增版本记录，报告绑定最新接受复核ID，后续复核不改旧CSV。
+六实体 PointSurvey、BoundaryPolicy、EnvelopeStudy、EnvelopeRun、FootprintReview、Report，贯穿表/model/schema/service/route、前端API/store/page。研究快照冻结完整原始测组、去重口径、方向参数、算法版本与选组范围；运行和复核新增版本记录，报告绑定最新接受复核ID，后续复核不改旧CSV。第七实体 RunComparison 独立持久化两次成功运行的凸包差异与双方来源指纹，创建即冻结、不随源数据或后续运行重算。
 
 科学坐标、group_ids、快照和结果使用 **MySQL LONGTEXT保存JSON**，由 `backend/src/config/json_type.py::PreciseJSON` 调用Python json序列化/解析，保留Float64往返数字。没有将x/y/面积声称为不存在的独立原生Double列；真正的 `boundary_policies.area_tie_relative` 是DOUBLE列。原生MySQL JSON读回百万级小数时可能改动1ULP，因此最终版本明确使用文本JSON。显示8位坐标或2位面积不改变底层值；CSV JSON保留完整往返数字。
 
@@ -61,7 +72,7 @@ API必须声明local_m，每组1至300条、最多8组，组ID唯一、组内点
 | 数据库 | MySQL8.4，科学数组LONGTEXT JSON、口径容差DOUBLE |
 | Docker | 恰好frontend/backend/worker/db/redis，五服务均真实健康检查 |
 
-运行不依赖Shapely；独立测试使用Shapely2.1.2作参考。`frontend/src`按api/stores/types/components/common/hooks/pages/router/utils/constants分工，六领域页加登录；比例图、口径条、面积摘要、点组表跨页共享。`backend/src`按models/schemas/services/controllers/routes/middlewares/config/utils/constants分工，seed在backend/scripts，初始schema说明在backend/migrations。测试、日志与截图在批根 `test-artifacts/gb-2408`，不混入源码。
+运行不依赖Shapely；独立测试使用Shapely2.1.2作参考。`frontend/src`按api/stores/types/components/common/hooks/pages/router/utils/constants分工，七领域页加登录；比例图、口径条、面积摘要、点组表、复测叠看与差异表跨页共享。`backend/src`按models/schemas/services/controllers/routes/middlewares/config/utils/constants分工，seed在backend/scripts，初始schema说明在backend/migrations。测试、日志与截图在批根 `test-artifacts/gb-2408`，不混入源码；其中 `test_geometry_comparison.py`、`test_comparison_logic.py` 用纯标准库验证交叠/相切/退化/缺组/口径拒绝/面积守恒，可 `python3 -I` 直接运行。
 
 `.env.example`：COMPOSE_PROJECT_NAME=survey-envelope，FRONTEND_PORT=18237，BACKEND_PORT=19237，DB_PORT=17737，SEED_DEMO=true，JWT_SECRET；数据库/Redis连接在compose注入。三个命名卷保存数据库、Redis、worker产物，Nginx代理/api并SPA回落，健康检查用127.0.0.1。前端依赖用匹配锁执行npm ci。开发时前端 `npm ci && npm run dev`，API `uvicorn src.main:app --host 0.0.0.0`，worker `python -m src.worker`，设置可连接的DATABASE_URL/REDIS_URL。
 
